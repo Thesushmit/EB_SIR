@@ -92,11 +92,7 @@ export default function LoginPage() {
           <label className="field-label">Password</label>
           <input className="field" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={6} />
 
-          {mode === 'login' && (
-            <p className="mb-4 text-sm text-slate-500">
-              Owner login: username <code>admin</code>, password <code>admin@123</code>.
-            </p>
-          )}
+          
           {message && <p className="mb-4 rounded-lg bg-slate-100 p-3 text-sm text-slate-700">{message}</p>}
           {!hasSupabaseConfig && <p className="mb-4 text-sm text-amber-700">Supabase credentials are not configured yet.</p>}
 
