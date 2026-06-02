@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 import { Download, IndianRupee, Plus, ReceiptText, Save, Trash2, UsersRound } from 'lucide-react';
 import { supabase } from '../services/supabase';
-import type { Bill, Profile, Tenant } from '../types';
+import type { Bill, Profile, Tenant, WellBill } from '../types';
 import { calculateBill, currency, monthLabel } from '../utils/billCalculator';
 
 type Props = { profile: Profile };
@@ -16,37 +16,103 @@ type BillForm = {
 };
 
 const currentMonth = new Date().toISOString().slice(0, 7) + '-01';
+const money = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 
 export default function AdminDashboard({ profile }: Props) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
+  const [wellBills, setWellBills] = useState<WellBill[]>([]);
   const [tenantForm, setTenantForm] = useState({ name: '', room_no: '', rent: '', phone: '', email: '' });
+  const [wellForm, setWellForm] = useState({ previousReading: '', currentReading: '', peopleCount: '4' });
   const [billForm, setBillForm] = useState<BillForm>({
     tenantId: '',
     billMonth: currentMonth,
     previousReading: '',
     currentReading: '',
     rate: '13.5',
-    wellBill: '14.5',
+    wellBill: '0',
   });
   const [editingTenantId, setEditingTenantId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
 
   async function loadData() {
-    const [{ data: tenantsData }, { data: billsData }] = await Promise.all([
+    const [{ data: tenantsData }, { data: billsData }, { data: wellBillsData, error: wellBillsError }] = await Promise.all([
       supabase.from('tenants').select('*').order('room_no'),
       supabase.from('bills').select('*, tenants(name, room_no, email)').order('bill_month', { ascending: false }),
+      supabase.from('well_bills').select('*').order('bill_month', { ascending: false }),
     ]);
 
     setTenants((tenantsData ?? []) as Tenant[]);
     setBills((billsData ?? []) as Bill[]);
+    setWellBills((wellBillsData ?? []) as WellBill[]);
+
+    if (wellBillsError) {
+      setMessage(`${wellBillsError.message}. Run the updated database.sql in Supabase to create well_bills.`);
+    }
   }
 
   useEffect(() => {
     loadData();
   }, []);
 
+  const wellUnits = Math.max(0, Number(wellForm.currentReading || 0) - Number(wellForm.previousReading || 0));
+  const wellPeopleCount = Math.max(1, Number(wellForm.peopleCount || 1));
+  const sharedWellBill = money(wellUnits / wellPeopleCount);
+  const selectedMonthWellBill = wellBills.find((wellBill) => wellBill.bill_month === billForm.billMonth);
+  const latestWellBill = useMemo(() => {
+    return wellBills
+      .filter((wellBill) => wellBill.bill_month < billForm.billMonth)
+      .sort((first, second) => {
+        const monthOrder = second.bill_month.localeCompare(first.bill_month);
+        return monthOrder || second.created_at.localeCompare(first.created_at);
+      })[0] ?? null;
+  }, [billForm.billMonth, wellBills]);
+
+  useEffect(() => {
+    setWellForm((old) => {
+      if (selectedMonthWellBill) {
+        return {
+          previousReading: String(selectedMonthWellBill.previous_reading),
+          currentReading: String(selectedMonthWellBill.current_reading),
+          peopleCount: String(selectedMonthWellBill.people_count),
+        };
+      }
+
+      const previousReading = latestWellBill ? String(latestWellBill.current_reading) : '';
+      if (old.previousReading === previousReading && old.currentReading === '') return old;
+
+      return { ...old, previousReading, currentReading: '' };
+    });
+  }, [latestWellBill, selectedMonthWellBill]);
+
+  useEffect(() => {
+    const wellBill = String(sharedWellBill);
+    setBillForm((old) => old.wellBill === wellBill ? old : { ...old, wellBill });
+  }, [sharedWellBill, wellForm.currentReading, wellForm.previousReading]);
+
   const selectedTenant = tenants.find((tenant) => tenant.id === billForm.tenantId);
+  const latestTenantBill = useMemo(() => {
+    if (!billForm.tenantId) return null;
+
+    return bills
+      .filter((bill) => bill.tenant_id === billForm.tenantId)
+      .sort((first, second) => {
+        const monthOrder = second.bill_month.localeCompare(first.bill_month);
+        return monthOrder || second.created_at.localeCompare(first.created_at);
+      })[0] ?? null;
+  }, [billForm.tenantId, bills]);
+
+  useEffect(() => {
+    setBillForm((old) => {
+      if (!old.tenantId) return old;
+
+      const previousReading = latestTenantBill ? String(latestTenantBill.current_reading) : '';
+      if (old.previousReading === previousReading) return old;
+
+      return { ...old, previousReading };
+    });
+  }, [latestTenantBill]);
+
   const preview = selectedTenant
     ? calculateBill({
         previousReading: Number(billForm.previousReading || 0),
@@ -101,9 +167,34 @@ export default function AdminDashboard({ profile }: Props) {
     else loadData();
   }
 
+  async function saveWellBill(event?: FormEvent) {
+    event?.preventDefault();
+
+    const { error } = await supabase.from('well_bills').upsert({
+      bill_month: billForm.billMonth,
+      previous_reading: Number(wellForm.previousReading),
+      current_reading: Number(wellForm.currentReading),
+      people_count: wellPeopleCount,
+    }, { onConflict: 'bill_month' });
+
+    if (error) {
+      setMessage(error.message);
+      return false;
+    }
+
+    setMessage('Well bill saved.');
+    await loadData();
+    return true;
+  }
+
   async function saveBill(event: FormEvent) {
     event.preventDefault();
     if (!selectedTenant) return;
+
+    if (wellForm.currentReading) {
+      const wellBillSaved = await saveWellBill();
+      if (!wellBillSaved) return;
+    }
 
     const { error } = await supabase.from('bills').upsert({
       tenant_id: selectedTenant.id,
@@ -122,8 +213,8 @@ export default function AdminDashboard({ profile }: Props) {
     }
 
     setMessage('Bill generated.');
-    setBillForm((old) => ({ ...old, previousReading: '', currentReading: '' }));
-    loadData();
+    setBillForm((old) => ({ ...old, currentReading: '' }));
+    await loadData();
   }
 
   async function updateStatus(id: string, payment_status: 'pending' | 'paid') {
@@ -171,6 +262,23 @@ export default function AdminDashboard({ profile }: Props) {
           </div>
         </form>
 
+        <form className="panel" onSubmit={saveWellBill}>
+          <div className="panel-heading">
+            <h3>Well bill</h3>
+            <button className="primary-button" type="submit"><Save size={17} />Save</button>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <input className="field" placeholder="Well previous reading" type="number" step="0.01" value={wellForm.previousReading} onChange={(e) => setWellForm({ ...wellForm, previousReading: e.target.value })} />
+            <input className="field" placeholder="Well current reading" type="number" step="0.01" value={wellForm.currentReading} onChange={(e) => setWellForm({ ...wellForm, currentReading: e.target.value })} />
+            <input className="field" placeholder="No. of persons" type="number" min="1" step="1" value={wellForm.peopleCount} onChange={(e) => setWellForm({ ...wellForm, peopleCount: e.target.value })} />
+          </div>
+          <div className="mt-1 grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-3">
+            <Mini label="Well units" value={String(wellUnits)} />
+            <Mini label="Persons" value={String(wellPeopleCount)} />
+            <Mini label="Per tenant well bill" value={currency(sharedWellBill)} />
+          </div>
+        </form>
+
         <form className="panel" onSubmit={saveBill}>
           <div className="panel-heading">
             <h3>Generate bill</h3>
@@ -185,17 +293,42 @@ export default function AdminDashboard({ profile }: Props) {
             <input className="field" placeholder="Previous reading" type="number" value={billForm.previousReading} onChange={(e) => setBillForm({ ...billForm, previousReading: e.target.value })} required />
             <input className="field" placeholder="Current reading" type="number" value={billForm.currentReading} onChange={(e) => setBillForm({ ...billForm, currentReading: e.target.value })} required />
             <input className="field" placeholder="Rate" type="number" step="0.01" value={billForm.rate} onChange={(e) => setBillForm({ ...billForm, rate: e.target.value })} required />
-            <input className="field" placeholder="Well bill" type="number" step="0.01" value={billForm.wellBill} onChange={(e) => setBillForm({ ...billForm, wellBill: e.target.value })} required />
+            <input className="field" placeholder="Well bill" type="number" step="0.01" value={billForm.wellBill} readOnly required />
           </div>
           {preview && (
-            <div className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-4">
+            <div className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4 sm:grid-cols-5">
               <Mini label="Units" value={String(preview.unitsUsed)} />
               <Mini label="Electricity" value={currency(preview.electricityCharge)} />
+              <Mini label="Well bill" value={currency(billForm.wellBill || 0)} />
               <Mini label="Rent" value={currency(selectedTenant?.rent ?? 0)} />
               <Mini label="Total" value={currency(preview.totalAmount)} />
             </div>
           )}
         </form>
+
+        <section className="panel overflow-hidden">
+          <div className="panel-heading"><h3>Well bill history</h3></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Month</th><th>Previous</th><th>Current</th><th>Units</th><th>Persons</th><th>Per person</th></tr></thead>
+              <tbody>
+                {wellBills.map((wellBill) => (
+                  <tr key={wellBill.id}>
+                    <td>{monthLabel(wellBill.bill_month)}</td>
+                    <td>{wellBill.previous_reading}</td>
+                    <td>{wellBill.current_reading}</td>
+                    <td>{wellBill.units_used}</td>
+                    <td>{wellBill.people_count}</td>
+                    <td>{currency(wellBill.per_person_bill)}</td>
+                  </tr>
+                ))}
+                {wellBills.length === 0 && (
+                  <tr><td colSpan={6}>No well bill saved yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       {message && <p className="rounded-lg bg-white p-3 text-sm text-slate-700 shadow-soft">{message}</p>}
@@ -224,11 +357,11 @@ export default function AdminDashboard({ profile }: Props) {
         <div className="panel-heading"><h3>Bills</h3></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Month</th><th>Tenant</th><th>Units</th><th>Bill</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Month</th><th>Tenant</th><th>Units</th><th>Well bill</th><th>Bill</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {bills.map((bill) => (
                 <tr key={bill.id}>
-                  <td>{monthLabel(bill.bill_month)}</td><td>{bill.tenants?.name}</td><td>{bill.units_used}</td><td>{currency(bill.total_amount)}</td>
+                  <td>{monthLabel(bill.bill_month)}</td><td>{bill.tenants?.name}</td><td>{bill.units_used}</td><td>{currency(bill.well_bill)}</td><td>{currency(bill.total_amount)}</td>
                   <td><span className={`status ${bill.payment_status}`}>{bill.payment_status}</span></td>
                   <td className="text-right">
                     <button className="text-button" onClick={() => updateStatus(bill.id, bill.payment_status === 'paid' ? 'pending' : 'paid')}>

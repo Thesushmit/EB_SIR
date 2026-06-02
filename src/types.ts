@@ -35,3 +35,14 @@ export type Bill = {
   created_at: string;
   tenants?: Pick<Tenant, 'name' | 'room_no' | 'email'>;
 };
+
+export type WellBill = {
+  id: string;
+  bill_month: string;
+  previous_reading: number;
+  current_reading: number;
+  units_used: number;
+  people_count: number;
+  per_person_bill: number;
+  created_at: string;
+};

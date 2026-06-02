@@ -41,9 +41,23 @@ create table public.bills (
   constraint bills_unique_month unique (tenant_id, bill_month)
 );
 
+create table public.well_bills (
+  id uuid primary key default uuid_generate_v4(),
+  bill_month date not null unique,
+  previous_reading numeric(12, 2) not null,
+  current_reading numeric(12, 2) not null,
+  units_used numeric(12, 2) generated always as (current_reading - previous_reading) stored,
+  people_count integer not null default 4,
+  per_person_bill numeric(12, 2) generated always as ((current_reading - previous_reading) / people_count) stored,
+  created_at timestamptz not null default now(),
+  constraint well_bills_reading_order check (current_reading >= previous_reading),
+  constraint well_bills_people_count check (people_count > 0)
+);
+
 alter table public.profiles enable row level security;
 alter table public.tenants enable row level security;
 alter table public.bills enable row level security;
+alter table public.well_bills enable row level security;
 
 create or replace function public.is_admin()
 returns boolean
@@ -88,6 +102,15 @@ using (
 
 create policy "Admins can manage bills"
 on public.bills for all
+using (public.is_admin())
+with check (public.is_admin());
+
+create policy "Users can read well bills"
+on public.well_bills for select
+using (auth.uid() is not null);
+
+create policy "Admins can manage well bills"
+on public.well_bills for all
 using (public.is_admin())
 with check (public.is_admin());
 
